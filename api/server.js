@@ -11,7 +11,7 @@ app.use(cors());              // 若前後端同網域，其實可以拿掉或�
 app.use(express.json());      // 讓我們可以讀 req.body JSON
 
 // 靜態檔案（如果你想用同一個 Node 來 serve 前端，可以這樣）
-// 例如 http://localhost:3000/customer/index.html
+// 在 Render 上其實用不到，主要是本機測試用
 app.use(express.static(path.join(__dirname, "..")));
 
 // ====== 假資料：菜單（之後可改成資料庫） ======
@@ -44,7 +44,7 @@ function createMockLinePayTransaction(order) {
   return { paymentUrl: fakePaymentUrl };
 }
 
-// ====== API：取得菜單（可給前端 customer.js 用） ======
+// ====== API：取得菜單（可給前端 customer.js / admin.js 用） ======
 app.get("/api/menu", (req, res) => {
   res.json(menuData);
 });
@@ -112,10 +112,88 @@ app.post("/api/order", (req, res) => {
   });
 });
 
-// ====== （選配）看目前所有訂單，用來 debug ======
+// ====== （原本就有）看目前所有訂單，用來 debug / 後台顯示 ======
 app.get("/api/orders", (req, res) => {
   res.json(orders);
 });
+
+
+// ====== 新增：更新訂單狀態（後台用） ======
+app.patch("/api/orders/:orderId/status", (req, res) => {
+  const orderId = req.params.orderId;
+  const { status } = req.body;
+
+  if (!status) {
+    return res.status(400).json({ message: "缺少狀態欄位" });
+  }
+
+  const order = orders.find(o => o.orderId === orderId);
+
+  if (!order) {
+    return res.status(404).json({ message: "找不到此訂單" });
+  }
+
+  order.status = status;
+  order.updatedAt = new Date().toISOString();
+
+  res.json(order);
+});
+
+
+// ====== 新增：菜單 CRUD（後台管理用） ======
+
+// 新增品項
+app.post("/api/menu", (req, res) => {
+  const { name, price, category } = req.body;
+
+  if (!name || typeof price !== "number") {
+    return res.status(400).json({ message: "品名與價格必填" });
+  }
+
+  const newId =
+    menuData.length > 0 ? Math.max(...menuData.map(m => m.id)) + 1 : 1;
+
+  const newItem = {
+    id: newId,
+    name,
+    price,
+    category: category || ""
+  };
+
+  menuData.push(newItem);
+  res.status(201).json(newItem);
+});
+
+// 更新品項
+app.put("/api/menu/:id", (req, res) => {
+  const id = Number(req.params.id);
+  const { name, price, category } = req.body;
+
+  const item = menuData.find(m => m.id === id);
+  if (!item) {
+    return res.status(404).json({ message: "找不到此品項" });
+  }
+
+  if (name !== undefined) item.name = name;
+  if (price !== undefined) item.price = price;
+  if (category !== undefined) item.category = category;
+
+  res.json(item);
+});
+
+// 刪除品項
+app.delete("/api/menu/:id", (req, res) => {
+  const id = Number(req.params.id);
+  const index = menuData.findIndex(m => m.id === id);
+
+  if (index === -1) {
+    return res.status(404).json({ message: "找不到此品項" });
+  }
+
+  const removed = menuData.splice(index, 1)[0];
+  res.json(removed);
+});
+
 
 // 啟動伺服器
 app.listen(PORT, () => {
