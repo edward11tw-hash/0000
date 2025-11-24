@@ -1,129 +1,208 @@
-// api/server.js
 const express = require("express");
 const cors = require("cors");
-const path = require("path");
 const fs = require("fs");
-const multer = require("multer");
+const path = require("path");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "..")));
 
-// -------------------------
-// 圖片上傳設定
-// -------------------------
-const uploadDir = path.join(__dirname, "..", "uploads", "menu");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
+// ------------------------------
+// 檔案路徑
+// ------------------------------
+const MENU_FILE = path.join(__dirname, "menu.json");
+const MEMBERS_FILE = path.join(__dirname, "members.json");
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const safe = file.originalname.replace(/\s+/g, "_");
-    cb(null, Date.now() + "-" + safe);
+// ------------------------------
+// 點數規則（你可自行調整）
+// ------------------------------
+const POINT_PER_AMOUNT = 100; // 消費滿多少元＝1點
+const POINT_VALUE = 1;        // 1 點可折抵多少元（1點＝1元）
+
+// ------------------------------
+// 工具：讀/寫 JSON
+// ------------------------------
+function loadJson(pathFile) {
+  if (!fs.existsSync(pathFile)) {
+    fs.writeFileSync(pathFile, JSON.stringify([], null, 2), "utf-8");
   }
-});
-
-const upload = multer({ storage });
-
-function buildImageUrl(req, filename) {
-  return `${req.protocol}://${req.get("host")}/uploads/menu/${filename}`;
+  const data = fs.readFileSync(pathFile, "utf-8");
+  try {
+    return JSON.parse(data);
+  } catch (err) {
+    fs.writeFileSync(pathFile, JSON.stringify([], null, 2), "utf-8");
+    return [];
+  }
 }
 
-// -------------------------
-// 假資料（之後可換成 DB）
-// -------------------------
-let menuData = [
-  { id: 1, name: "牛肉麵", price: 150, category: "主食", image: "" },
-  { id: 2, name: "陽春麵", price: 80, category: "主食", image: "" },
-  { id: 3, name: "炸雞塊", price: 60, category: "小菜", image: "" },
-  { id: 4, name: "滷蛋", price: 20, category: "小菜", image: "" },
-  { id: 5, name: "珍珠奶茶", price: 60, category: "飲料", image: "" },
-  { id: 6, name: "紅茶", price: 30, category: "飲料", image: "" }
-];
+function saveJson(pathFile, data) {
+  fs.writeFileSync(pathFile, JSON.stringify(data, null, 2), "utf-8");
+}
 
-// -------------------------
-// API：取得菜單
-// -------------------------
+// ------------------------------
+// 載入資料
+// ------------------------------
+function loadMenu() {
+  return loadJson(MENU_FILE);
+}
+function saveMenu(data) {
+  saveJson(MENU_FILE, data);
+}
+
+function loadMembers() {
+  return loadJson(MEMBERS_FILE);
+}
+function saveMembers(data) {
+  saveJson(MEMBERS_FILE, data);
+}
+
+// ------------------------------
+// API：菜單
+// ------------------------------
 app.get("/api/menu", (req, res) => {
-  res.json(menuData);
+  res.json(loadMenu());
 });
 
-// -------------------------
-// API：新增菜單
-// -------------------------
-app.post("/api/menu", upload.single("image"), (req, res) => {
-  const { name, price, category } = req.body;
-  const numPrice = Number(price);
+app.post("/api/menu", (req, res) => {
+  const menu = loadMenu();
+  const { name, price, category, image } = req.body;
 
-  if (!name || Number.isNaN(numPrice)) {
-    return res.status(400).json({ message: "品名與價格必填" });
+  if (!name || typeof price !== "number") {
+    return res.status(400).json({ message: "缺少品名或價格錯誤" });
   }
 
-  const newId =
-    menuData.length > 0 ? Math.max(...menuData.map(m => m.id)) + 1 : 1;
+  const newId = menu.length ? Math.max(...menu.map(i => i.id)) + 1 : 1;
+  const item = { id: newId, name, price, category, image };
+  menu.push(item);
+  saveMenu(menu);
 
-  let image = "";
-  if (req.file) image = buildImageUrl(req, req.file.filename);
+  res.status(201).json(item);
+});
 
-  const newItem = {
-    id: newId,
-    name,
-    price: numPrice,
-    category: category || "",
-    image
+app.put("/api/menu/:id", (req, res) => {
+  const menu = loadMenu();
+  const id = Number(req.params.id);
+
+  const idx = menu.findIndex(i => i.id === id);
+  if (idx === -1) return res.status(404).json({ message: "品項不存在" });
+
+  const { name, price, category, image } = req.body;
+
+  menu[idx] = {
+    ...menu[idx],
+    ...(name && { name }),
+    ...(typeof price === "number" && { price }),
+    ...(category !== undefined && { category }),
+    ...(image !== undefined && { image })
   };
 
-  menuData.push(newItem);
-  res.status(201).json(newItem);
+  saveMenu(menu);
+  res.json(menu[idx]);
 });
 
-// -------------------------
-// API：修改菜單
-// -------------------------
-app.put("/api/menu/:id", upload.single("image"), (req, res) => {
-  const id = Number(req.params.id);
-  const { name, price, category } = req.body;
-  const item = menuData.find(m => m.id === id);
-
-  if (!item) return res.status(404).json({ message: "找不到品項" });
-
-  if (name !== undefined) item.name = name;
-  if (price !== undefined) {
-    const p = Number(price);
-    if (!Number.isNaN(p)) item.price = p;
-  }
-  if (category !== undefined) item.category = category;
-
-  if (req.file) {
-    item.image = buildImageUrl(req, req.file.filename);
-  }
-
-  res.json(item);
-});
-
-// -------------------------
-// API：刪除品項
-// -------------------------
 app.delete("/api/menu/:id", (req, res) => {
+  const menu = loadMenu();
   const id = Number(req.params.id);
-  const index = menuData.findIndex(m => m.id === id);
 
-  if (index === -1) {
-    return res.status(404).json({ message: "找不到品項" });
-  }
+  const idx = menu.findIndex(i => i.id === id);
+  if (idx === -1) return res.status(404).json({ message: "品項不存在" });
 
-  const removed = menuData.splice(index, 1)[0];
-  res.json(removed);
+  menu.splice(idx, 1);
+  saveMenu(menu);
+
+  res.json({ message: "已刪除" });
 });
 
-// -------------------------
-// 啟動 Server
-// -------------------------
-app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
+// ------------------------------
+// ⭐ API：查詢 / 建立會員
+// ------------------------------
+app.post("/api/member/lookup", (req, res) => {
+  const { phone, name } = req.body;
+
+  if (!phone) {
+    return res.status(400).json({ message: "缺少手機號碼" });
+  }
+
+  let members = loadMembers();
+  let m = members.find(x => x.phone === phone);
+
+  // 沒有就自動建立
+  if (!m) {
+    m = { phone, name: name || "", points: 0 };
+    members.push(m);
+    saveMembers(members);
+  }
+
+  res.json(m);
+});
+
+// ------------------------------
+// ⭐ API：建立訂單 + 點數處理
+// ------------------------------
+app.post("/api/order", (req, res) => {
+  const { items, totalAmount, mode, table, memberPhone, usePoints = 0 } = req.body;
+
+  if (!items || items.length === 0) {
+    return res.status(400).json({ message: "沒有商品內容" });
+  }
+
+  let finalTotal = totalAmount;
+  let members = loadMembers();
+  let member = null;
+  let beforePoints = 0;
+  let usedPoints = 0;
+
+  // ----會員折抵----
+  if (memberPhone) {
+    member = members.find(m => m.phone === memberPhone);
+
+    if (!member) {
+      member = { phone: memberPhone, name: "", points: 0 };
+      members.push(member);
+    }
+
+    beforePoints = member.points;
+
+    const maxUsable = Math.min(
+      member.points,
+      Math.floor(finalTotal / POINT_VALUE)
+    );
+    usedPoints = Math.min(usePoints, maxUsable);
+
+    if (usedPoints > 0) {
+      finalTotal -= usedPoints * POINT_VALUE;
+      member.points -= usedPoints;
+    }
+  }
+
+  // ----消費換點----
+  let earnedPoints = Math.floor(finalTotal / POINT_PER_AMOUNT);
+
+  if (member) {
+    member.points += earnedPoints;
+    saveMembers(members);
+  }
+
+  const orderId = "O" + Date.now();
+
+  res.json({
+    orderId,
+    finalTotal,
+    member: member
+      ? {
+          phone: member.phone,
+          beforePoints,
+          usedPoints,
+          earnedPoints,
+          afterPoints: member.points
+        }
+      : null
+  });
+});
+
+// ------------------------------
+// 啟動 server
+// ------------------------------
+app.listen(3000, () => {
+  console.log("API server running (menu + members)");
 });
