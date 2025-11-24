@@ -20,44 +20,42 @@ const POINT_PER_AMOUNT = 100; // 消費滿多少元＝1點
 const POINT_VALUE = 1;        // 1 點可折抵多少元（1點＝1元）
 
 // ------------------------------
-// 工具：讀/寫 JSON
+// 通用讀寫 JSON
 // ------------------------------
-function loadJson(pathFile) {
-  if (!fs.existsSync(pathFile)) {
-    fs.writeFileSync(pathFile, JSON.stringify([], null, 2), "utf-8");
+function loadJson(filePath) {
+  if (!fs.existsSync(filePath)) {
+    fs.writeFileSync(filePath, JSON.stringify([], null, 2), "utf-8");
   }
-  const data = fs.readFileSync(pathFile, "utf-8");
+  const data = fs.readFileSync(filePath, "utf-8");
   try {
     return JSON.parse(data);
   } catch (err) {
-    fs.writeFileSync(pathFile, JSON.stringify([], null, 2), "utf-8");
+    console.error(filePath, "格式錯誤，重置為空陣列");
+    fs.writeFileSync(filePath, JSON.stringify([], null, 2), "utf-8");
     return [];
   }
 }
 
-function saveJson(pathFile, data) {
-  fs.writeFileSync(pathFile, JSON.stringify(data, null, 2), "utf-8");
+function saveJson(filePath, data) {
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 
-// ------------------------------
-// 載入資料
-// ------------------------------
 function loadMenu() {
   return loadJson(MENU_FILE);
 }
-function saveMenu(data) {
-  saveJson(MENU_FILE, data);
+function saveMenu(menu) {
+  saveJson(MENU_FILE, menu);
 }
 
 function loadMembers() {
   return loadJson(MEMBERS_FILE);
 }
-function saveMembers(data) {
-  saveJson(MEMBERS_FILE, data);
+function saveMembers(members) {
+  saveJson(MEMBERS_FILE, members);
 }
 
 // ------------------------------
-// API：菜單
+// 菜單 API
 // ------------------------------
 app.get("/api/menu", (req, res) => {
   res.json(loadMenu());
@@ -73,6 +71,7 @@ app.post("/api/menu", (req, res) => {
 
   const newId = menu.length ? Math.max(...menu.map(i => i.id)) + 1 : 1;
   const item = { id: newId, name, price, category, image };
+
   menu.push(item);
   saveMenu(menu);
 
@@ -114,7 +113,7 @@ app.delete("/api/menu/:id", (req, res) => {
 });
 
 // ------------------------------
-// ⭐ API：查詢 / 建立會員
+// ⭐ 會員：查詢 / 自動建立
 // ------------------------------
 app.post("/api/member/lookup", (req, res) => {
   const { phone, name } = req.body;
@@ -137,25 +136,25 @@ app.post("/api/member/lookup", (req, res) => {
 });
 
 // ------------------------------
-// ⭐ API：建立訂單 + 點數處理
+// ⭐ 訂單 ＋ 點數處理
 // ------------------------------
 app.post("/api/order", (req, res) => {
   const { items, totalAmount, mode, table, memberPhone, usePoints = 0 } = req.body;
 
-  if (!items || items.length === 0) {
+  if (!items || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ message: "沒有商品內容" });
   }
 
-  let finalTotal = totalAmount;
+  let finalTotal = totalAmount || 0;
+
   let members = loadMembers();
   let member = null;
   let beforePoints = 0;
   let usedPoints = 0;
 
-  // ----會員折抵----
+  // 會員折抵
   if (memberPhone) {
     member = members.find(m => m.phone === memberPhone);
-
     if (!member) {
       member = { phone: memberPhone, name: "", points: 0 };
       members.push(member);
@@ -175,8 +174,11 @@ app.post("/api/order", (req, res) => {
     }
   }
 
-  // ----消費換點----
-  let earnedPoints = Math.floor(finalTotal / POINT_PER_AMOUNT);
+  // 消費換點
+  let earnedPoints = 0;
+  if (finalTotal > 0) {
+    earnedPoints = Math.floor(finalTotal / POINT_PER_AMOUNT);
+  }
 
   if (member) {
     member.points += earnedPoints;
@@ -201,8 +203,9 @@ app.post("/api/order", (req, res) => {
 });
 
 // ------------------------------
-// 啟動 server
+// 啟動伺服器
 // ------------------------------
-app.listen(3000, () => {
-  console.log("API server running (menu + members)");
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log("API server running on port", PORT);
 });
