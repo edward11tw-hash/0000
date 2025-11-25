@@ -228,24 +228,11 @@ app.post("/api/order", (req, res) => {
   const createdAt = new Date().toISOString();
   const ticketNo = mode === "takeout" ? generateTicketNo() : null;
 
-  // ⭐ 把前端的 items 正規化，包含甜度 / 冰量
-  const normalizedItems = items.map(it => ({
-    itemId: it.itemId,
-    name: it.name,
-    basePrice: Number(it.basePrice) || 0,
-    extraPricePerUnit: Number(it.extraPricePerUnit) || 0,
-    qty: Number(it.qty) || 0,
-    removeKeys: Array.isArray(it.removeKeys) ? it.removeKeys : [],
-    addKeys: Array.isArray(it.addKeys) ? it.addKeys : [],
-    sugarLevel: it.sugarLevel || null, // ⭐ 甜度
-    iceLevel: it.iceLevel || null      // ⭐ 冰量
-  }));
-
   // ⭐ 把訂單真的存到 orders.json
   const orders = loadOrders();
   const order = {
     orderId,                                // 給前端 / 後台用
-    items: normalizedItems,
+    items,
     mode: mode || null,                     // 內用 / 外帶
     table: mode === "dinein" ? (table || "") : null,
     totalAmount: Number(totalAmount) || 0,  // 原價總額
@@ -295,6 +282,7 @@ app.get("/api/orders", (req, res) => {
 // ------------------------------
 // ⭐ 後台：更新訂單狀態
 //    PATCH /api/orders/:orderId/status
+//    body: { status: "COOKING" | "READY" | "DONE" | "PENDING_PAYMENT" | "PAID" }
 // ------------------------------
 app.patch("/api/orders/:orderId/status", (req, res) => {
   const { orderId } = req.params;
