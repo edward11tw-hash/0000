@@ -1,3 +1,5 @@
+// server.js
+
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
@@ -12,13 +14,22 @@ app.use(express.json());
 // ------------------------------
 const MENU_FILE = path.join(__dirname, "menu.json");
 const MEMBERS_FILE = path.join(__dirname, "members.json");
-const ORDERS_FILE = path.join(__dirname, "orders.json"); // ⭐ 新增：訂單檔案
+const ORDERS_FILE = path.join(__dirname, "orders.json");
 
 // ------------------------------
 // 點數規則（你可自行調整）
 // ------------------------------
 const POINT_PER_AMOUNT = 100; // 消費滿多少元＝1點
 const POINT_VALUE = 1;        // 1 點可折抵多少元（1點＝1元）
+
+// 可用訂單狀態（要跟 admin/orders.js 一樣）
+const VALID_STATUS = [
+  "PENDING_PAYMENT",
+  "PAID",
+  "COOKING",
+  "READY",
+  "DONE"
+];
 
 // ------------------------------
 // 通用讀寫 JSON
@@ -80,7 +91,7 @@ app.post("/api/menu", (req, res) => {
     return res.status(400).json({ message: "缺少品名或價格錯誤" });
   }
 
-  const newId = menu.length ? Math.max(...menu.map(i => i.id)) + 1 : 1;
+  const newId = menu.length ? Math.max(...menu.map(i => i.id || 0)) + 1 : 1;
   const item = { id: newId, name, price, category, image };
 
   menu.push(item);
@@ -93,7 +104,7 @@ app.put("/api/menu/:id", (req, res) => {
   const menu = loadMenu();
   const id = Number(req.params.id);
 
-  const idx = menu.findIndex(i => i.id === id);
+  const idx = menu.findIndex(i => Number(i.id) === id);
   if (idx === -1) return res.status(404).json({ message: "品項不存在" });
 
   const { name, price, category, image } = req.body;
@@ -114,7 +125,7 @@ app.delete("/api/menu/:id", (req, res) => {
   const menu = loadMenu();
   const id = Number(req.params.id);
 
-  const idx = menu.findIndex(i => i.id === id);
+  const idx = menu.findIndex(i => Number(i.id) === id);
   if (idx === -1) return res.status(404).json({ message: "品項不存在" });
 
   menu.splice(idx, 1);
@@ -147,14 +158,23 @@ app.post("/api/member/lookup", (req, res) => {
 });
 
 // ------------------------------
-// 小工具：產生訂單 ID & 建立時間
+// 小工具：產生訂單 ID / ticketNo
 // ------------------------------
 function generateOrderId() {
   return "O" + Date.now();
 }
 
+// 外帶取餐號碼（簡單版）
+function generateTicketNo() {
+  const now = new Date();
+  const h = String(now.getHours()).padStart(2, "0");
+  const m = String(now.getMinutes()).padStart(2, "0");
+  const rand = Math.floor(Math.random() * 90 + 10); // 10~99
+  return `${h}${m}${rand}`;
+}
+
 // ------------------------------
-// ⭐ 訂單 ＋ 點數處理
+// ⭐ 訂單 ＋ 點數處理（前台結帳用）
 // ------------------------------
 app.post("/api/order", (req, res) => {
   const { items, totalAmount, mode, table, memberPhone, usePoints = 0 } = req.body;
@@ -184,7 +204,8 @@ app.post("/api/order", (req, res) => {
       member.points,
       Math.floor(finalTotal / POINT_VALUE)
     );
-    usedPoints = Math.min(usePoints, maxUsable);
+    const wantUse = Number(usePoints) || 0;
+    usedPoints = Math.min(wantUse, maxUsable);
 
     if (usedPoints > 0) {
       finalTotal -= usedPoints * POINT_VALUE;
@@ -205,26 +226,28 @@ app.post("/api/order", (req, res) => {
 
   const orderId = generateOrderId();
   const createdAt = new Date().toISOString();
+  const ticketNo = mode === "takeout" ? generateTicketNo() : null;
 
   // ⭐ 把訂單真的存到 orders.json
   const orders = loadOrders();
   const order = {
-    id: orderId,
+    orderId,                                // 給前端 / 後台用
     items,
-    mode: mode || null,                         // 內用 / 外帶
+    mode: mode || null,                     // 內用 / 外帶
     table: mode === "dinein" ? (table || "") : null,
-    totalAmount: Number(totalAmount) || 0,      // 原價總額
-    finalTotal,                                 // 折抵後實付
+    totalAmount: Number(totalAmount) || 0,  // 原價總額
+    finalTotal,                             // 折抵後實付
     memberPhone: member ? member.phone : null,
     usedPoints,
     earnedPoints,
-    status: "pending",                          // pending / in_progress / done / cancelled
-    createdAt
+    status: "PENDING_PAYMENT",              // ⭐ 新訂單狀態
+    createdAt,
+    ticketNo
   };
   orders.push(order);
   saveOrders(orders);
 
-  // 回傳給前端（跟你原本格式相容，還多存了訂單）
+  // 回傳給前端（customer.js 用 data.orderId; 之後要顯示點數也可用 member）
   res.json({
     orderId,
     finalTotal,
@@ -241,7 +264,7 @@ app.post("/api/order", (req, res) => {
 });
 
 // ------------------------------
-// ⭐ 後台：取得所有訂單
+// ⭐ 後台：取得所有訂單（admin/orders.js 用）
 // ------------------------------
 app.get("/api/orders", (req, res) => {
   const orders = loadOrders();
@@ -259,7 +282,7 @@ app.get("/api/orders", (req, res) => {
 // ------------------------------
 // ⭐ 後台：更新訂單狀態
 //    PATCH /api/orders/:orderId/status
-//    body: { status: "in_progress" | "done" | "cancelled" ... }
+//    body: { status: "COOKING" | "READY" | "DONE" | "PENDING_PAYMENT" | "PAID" }
 // ------------------------------
 app.patch("/api/orders/:orderId/status", (req, res) => {
   const { orderId } = req.params;
@@ -269,8 +292,12 @@ app.patch("/api/orders/:orderId/status", (req, res) => {
     return res.status(400).json({ message: "必須提供新的狀態" });
   }
 
+  if (!VALID_STATUS.includes(status)) {
+    return res.status(400).json({ message: "無效的訂單狀態" });
+  }
+
   const orders = loadOrders();
-  const idx = orders.findIndex(o => String(o.id) === String(orderId));
+  const idx = orders.findIndex(o => String(o.orderId) === String(orderId));
   if (idx === -1) {
     return res.status(404).json({ message: "找不到此訂單" });
   }
