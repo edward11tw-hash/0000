@@ -12,6 +12,7 @@ app.use(express.json());
 // ------------------------------
 const MENU_FILE = path.join(__dirname, "menu.json");
 const MEMBERS_FILE = path.join(__dirname, "members.json");
+const ORDERS_FILE = path.join(__dirname, "orders.json"); // ⭐ 新增：訂單檔案
 
 // ------------------------------
 // 點數規則（你可自行調整）
@@ -40,6 +41,9 @@ function saveJson(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 
+// ------------------------------
+// menu / members / orders 的存取
+// ------------------------------
 function loadMenu() {
   return loadJson(MENU_FILE);
 }
@@ -52,6 +56,13 @@ function loadMembers() {
 }
 function saveMembers(members) {
   saveJson(MEMBERS_FILE, members);
+}
+
+function loadOrders() {
+  return loadJson(ORDERS_FILE);
+}
+function saveOrders(orders) {
+  saveJson(ORDERS_FILE, orders);
 }
 
 // ------------------------------
@@ -136,6 +147,13 @@ app.post("/api/member/lookup", (req, res) => {
 });
 
 // ------------------------------
+// 小工具：產生訂單 ID & 建立時間
+// ------------------------------
+function generateOrderId() {
+  return "O" + Date.now();
+}
+
+// ------------------------------
 // ⭐ 訂單 ＋ 點數處理
 // ------------------------------
 app.post("/api/order", (req, res) => {
@@ -145,7 +163,7 @@ app.post("/api/order", (req, res) => {
     return res.status(400).json({ message: "沒有商品內容" });
   }
 
-  let finalTotal = totalAmount || 0;
+  let finalTotal = Number(totalAmount) || 0;
 
   let members = loadMembers();
   let member = null;
@@ -185,8 +203,28 @@ app.post("/api/order", (req, res) => {
     saveMembers(members);
   }
 
-  const orderId = "O" + Date.now();
+  const orderId = generateOrderId();
+  const createdAt = new Date().toISOString();
 
+  // ⭐ 把訂單真的存到 orders.json
+  const orders = loadOrders();
+  const order = {
+    id: orderId,
+    items,
+    mode: mode || null,                         // 內用 / 外帶
+    table: mode === "dinein" ? (table || "") : null,
+    totalAmount: Number(totalAmount) || 0,      // 原價總額
+    finalTotal,                                 // 折抵後實付
+    memberPhone: member ? member.phone : null,
+    usedPoints,
+    earnedPoints,
+    status: "pending",                          // pending / in_progress / done / cancelled
+    createdAt
+  };
+  orders.push(order);
+  saveOrders(orders);
+
+  // 回傳給前端（跟你原本格式相容，還多存了訂單）
   res.json({
     orderId,
     finalTotal,
@@ -200,6 +238,47 @@ app.post("/api/order", (req, res) => {
         }
       : null
   });
+});
+
+// ------------------------------
+// ⭐ 後台：取得所有訂單
+// ------------------------------
+app.get("/api/orders", (req, res) => {
+  const orders = loadOrders();
+
+  // 依建立時間新到舊排
+  orders.sort((a, b) => {
+    const ta = new Date(a.createdAt || 0).getTime();
+    const tb = new Date(b.createdAt || 0).getTime();
+    return tb - ta;
+  });
+
+  res.json(orders);
+});
+
+// ------------------------------
+// ⭐ 後台：更新訂單狀態
+//    PATCH /api/orders/:orderId/status
+//    body: { status: "in_progress" | "done" | "cancelled" ... }
+// ------------------------------
+app.patch("/api/orders/:orderId/status", (req, res) => {
+  const { orderId } = req.params;
+  const { status } = req.body;
+
+  if (!status) {
+    return res.status(400).json({ message: "必須提供新的狀態" });
+  }
+
+  const orders = loadOrders();
+  const idx = orders.findIndex(o => String(o.id) === String(orderId));
+  if (idx === -1) {
+    return res.status(404).json({ message: "找不到此訂單" });
+  }
+
+  orders[idx].status = status;
+  saveOrders(orders);
+
+  res.json(orders[idx]);
 });
 
 // ------------------------------
