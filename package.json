@@ -2,9 +2,9 @@
   "name": "online-menu",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "api/server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node api/server.js"
   },
   "keywords": [],
   "author": "",
@@ -13,6 +13,8 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^5.1.0",
+    "pg": "^8.12.0",
+    "dotenv": "^16.4.5",
     "qrcode": "^1.5.4"
   }
 }
