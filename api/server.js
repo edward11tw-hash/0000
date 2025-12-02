@@ -151,34 +151,104 @@ app.get("/api/menu", async (req, res) => {
 });
 
 app.post("/api/menu", async (req, res) => {
-  const { name, price, category, image } = req.body;
+  // 從前端接收的欄位（後台 menu.js 會送這些）
+  const {
+    name,
+    price,
+    category,
+    image,
+    description,
+    tags,
+    spicy,
+    isHot
+  } = req.body;
 
-  if (!name || typeof price !== "number") {
+  const priceNumber = Number(price);
+  if (!name || !Number.isFinite(priceNumber)) {
     return res.status(400).json({ message: "缺少品名或價格錯誤" });
   }
 
   try {
     if (pool) {
+      // tags 可能是陣列或字串，先轉成儲存到 DB 的字串
+      let tagsValue = null;
+      if (Array.isArray(tags)) {
+        tagsValue = tags.join(",");
+      } else if (typeof tags === "string" && tags.trim() !== "") {
+        tagsValue = tags.trim();
+      }
+
+      const spicyVal = !!spicy;  // 轉成 true/false
+      const isHotVal = !!isHot;  // 對應資料表 is_hot
+
       const result = await pool.query(
-        `INSERT INTO menu_items (name, price, category, image)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, name, price, category, image`,
-        [name, price, category || null, image || null]
+        `
+        INSERT INTO menu_items
+          (name, price, category, image, description, tags, spicy, is_hot)
+        VALUES
+          ($1,   $2,    $3,       $4,    $5,          $6,   $7,    $8)
+        RETURNING
+          id, name, price, category, image, description, tags, spicy, is_hot
+        `,
+        [
+          name,
+          priceNumber,
+          category || null,
+          image || null,
+          description || null,
+          tagsValue,
+          spicyVal,
+          isHotVal
+        ]
       );
+
       const row = result.rows[0];
+
+      // 把 DB 裡的 tags 字串轉成陣列回給前端（跟 GET /api/menu 一致）
+      let parsedTags = [];
+      if (Array.isArray(row.tags)) {
+        parsedTags = row.tags;
+      } else if (typeof row.tags === "string" && row.tags.trim() !== "") {
+        parsedTags = row.tags
+          .split(/[;,、，]/)
+          .map(t => t.trim())
+          .filter(Boolean);
+      }
+
       return res.status(201).json({
         id: row.id,
         name: row.name,
         price: Number(row.price),
         category: row.category,
-        image: row.image
+        image: row.image,
+        description: row.description || "",
+        tags: parsedTags,
+        spicy: !!row.spicy,
+        isHot: !!row.is_hot
       });
     }
 
-    // 無 DB 時走原本 JSON 模式
+    // 無 DB 時走原本 JSON 模式（順便支援新欄位）
     const menu = loadMenu();
     const newId = menu.length ? Math.max(...menu.map(i => i.id || 0)) + 1 : 1;
-    const item = { id: newId, name, price, category, image };
+    const item = {
+      id: newId,
+      name,
+      price: priceNumber,
+      category,
+      image,
+      description: description || "",
+      tags: Array.isArray(tags)
+        ? tags
+        : typeof tags === "string"
+        ? tags
+            .split(/[;,、，]/)
+            .map(t => t.trim())
+            .filter(Boolean)
+        : [],
+      spicy: !!spicy,
+      isHot: !!isHot
+    };
     menu.push(item);
     saveMenu(menu);
     return res.status(201).json(item);
@@ -190,61 +260,173 @@ app.post("/api/menu", async (req, res) => {
 
 app.put("/api/menu/:id", async (req, res) => {
   const id = Number(req.params.id);
-  const { name, price, category, image } = req.body;
+
+  const {
+    name,
+    price,
+    category,
+    image,
+    description,
+    tags,
+    spicy,
+    isHot
+  } = req.body;
 
   try {
     if (pool) {
-      // 先查出舊資料
+      // 先查出舊資料（包含新欄位）
       const found = await pool.query(
-        "SELECT id, name, price, category, image FROM menu_items WHERE id = $1",
+        `
+        SELECT
+          id,
+          name,
+          price,
+          category,
+          image,
+          description,
+          tags,
+          spicy,
+          is_hot
+        FROM menu_items
+        WHERE id = $1
+        `,
         [id]
       );
+
       if (found.rowCount === 0) {
         return res.status(404).json({ message: "品項不存在" });
       }
 
       const old = found.rows[0];
-      const newName = name || old.name;
-      const newPrice = typeof price === "number" ? price : old.price;
-      const newCategory = category !== undefined ? category : old.category;
-      const newImage = image !== undefined ? image : old.image;
 
+      // —— 決定要更新成什麼值（沒給就沿用舊資料） ——
+      const newName = name || old.name;
+
+      const newPrice = 
+        price !== undefined && !Number.isNaN(Number(price))
+          ? Number(price)
+          : Number(old.price);
+
+      const newCategory =
+        category !== undefined ? category : old.category;
+
+      const newImage =
+        image !== undefined ? image : old.image;
+
+      const newDescription =
+        description !== undefined ? description : old.description;
+
+      // tags 可能是陣列 / 字串 / 未給（沿用舊的）
+      let tagsToUse;
+      if (tags !== undefined) {
+        tagsToUse = tags;
+      } else {
+        tagsToUse = old.tags;
+      }
+
+      let tagsValue = null;
+      if (Array.isArray(tagsToUse)) {
+        tagsValue = tagsToUse.join(",");
+      } else if (typeof tagsToUse === "string" && tagsToUse.trim() !== "") {
+        tagsValue = tagsToUse.trim();
+      }
+
+      // 辣 / 熱銷：沒給就沿用舊值
+      const newSpicy =
+        spicy !== undefined ? !!spicy : !!old.spicy;
+      const newIsHot =
+        isHot !== undefined ? !!isHot : !!old.is_hot;
+
+      // —— 寫回資料庫 ——
       const result = await pool.query(
-        `UPDATE menu_items
-         SET name = $2,
-             price = $3,
-             category = $4,
-             image = $5
-         WHERE id = $1
-         RETURNING id, name, price, category, image`,
-        [id, newName, newPrice, newCategory, newImage]
+        `
+        UPDATE menu_items
+        SET
+          name        = $2,
+          price       = $3,
+          category    = $4,
+          image       = $5,
+          description = $6,
+          tags        = $7,
+          spicy       = $8,
+          is_hot      = $9
+        WHERE id = $1
+        RETURNING
+          id, name, price, category, image, description, tags, spicy, is_hot
+        `,
+        [
+          id,
+          newName,
+          newPrice,
+          newCategory || null,
+          newImage || null,
+          newDescription || null,
+          tagsValue,
+          newSpicy,
+          newIsHot
+        ]
       );
 
       const row = result.rows[0];
+
+      // tags 轉成陣列再回給前端
+      let parsedTags = [];
+      if (Array.isArray(row.tags)) {
+        parsedTags = row.tags;
+      } else if (typeof row.tags === "string" && row.tags.trim() !== "") {
+        parsedTags = row.tags
+          .split(/[;,、，]/)
+          .map(t => t.trim())
+          .filter(Boolean);
+      }
+
       return res.json({
         id: row.id,
         name: row.name,
         price: Number(row.price),
         category: row.category,
-        image: row.image
+        image: row.image,
+        description: row.description || "",
+        tags: parsedTags,
+        spicy: !!row.spicy,
+        isHot: !!row.is_hot
       });
     }
 
-    // 無 DB：原本 JSON 模式
+    // —— 無 DB：原本 JSON 模式（順便支援新欄位） ——
     const menu = loadMenu();
     const idx = menu.findIndex(i => Number(i.id) === id);
-    if (idx === -1) return res.status(404).json({ message: "品項不存在" });
+    if (idx === -1) {
+      return res.status(404).json({ message: "品項不存在" });
+    }
 
-    menu[idx] = {
-      ...menu[idx],
+    const old = menu[idx];
+
+    const updated = {
+      ...old,
       ...(name && { name }),
-      ...(typeof price === "number" && { price }),
+      ...(price !== undefined &&
+        !Number.isNaN(Number(price)) && { price: Number(price) }),
       ...(category !== undefined && { category }),
-      ...(image !== undefined && { image })
+      ...(image !== undefined && { image }),
+      ...(description !== undefined && { description }),
+      ...(tags !== undefined && {
+        tags: Array.isArray(tags)
+          ? tags
+          : typeof tags === "string"
+          ? tags
+              .split(/[;,、，]/)
+              .map(t => t.trim())
+              .filter(Boolean)
+          : []
+      }),
+      ...(spicy !== undefined && { spicy: !!spicy }),
+      ...(isHot !== undefined && { isHot: !!isHot })
     };
 
+    menu[idx] = updated;
     saveMenu(menu);
-    return res.json(menu[idx]);
+    return res.json(updated);
   } catch (err) {
     console.error("更新菜單失敗", err);
     res.status(500).json({ message: "更新菜單失敗" });
