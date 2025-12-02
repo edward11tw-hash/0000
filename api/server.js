@@ -4,6 +4,23 @@ const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
+const { Pool } = require("pg");
+
+// 有沒有設定 DATABASE_URL？有的話就用 PostgreSQL
+const useDb = !!process.env.DATABASE_URL;
+let pool = null;
+
+if (useDb) {
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.NODE_ENV === "production"
+      ? { rejectUnauthorized: false }
+      : false
+  });
+  console.log("✅ 使用 PostgreSQL 資料庫作為【菜單】儲存");
+} else {
+  console.log("⚠️ 未設定 DATABASE_URL，【菜單】改用本機 JSON 檔 menu.json 儲存");
+}
 
 const app = express();
 app.use(cors());
@@ -79,60 +96,161 @@ function saveOrders(orders) {
 // ------------------------------
 // 菜單 API
 // ------------------------------
-app.get("/api/menu", (req, res) => {
-  res.json(loadMenu());
+app.get("/api/menu", async (req, res) => {
+  try {
+    if (pool) {
+      const result = await pool.query(
+        "SELECT id, name, price, category, image FROM menu_items ORDER BY id ASC"
+      );
+      const items = result.rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        price: Number(r.price),
+        category: r.category,
+        image: r.image
+      }));
+      return res.json(items);
+    }
+
+    // 沒有設定資料庫時，退回原本的 JSON 檔模式
+    return res.json(loadMenu());
+  } catch (err) {
+    console.error("讀取菜單失敗", err);
+    res.status(500).json({ message: "讀取菜單失敗" });
+  }
 });
 
-app.post("/api/menu", (req, res) => {
-  const menu = loadMenu();
+app.post("/api/menu", async (req, res) => {
   const { name, price, category, image } = req.body;
 
   if (!name || typeof price !== "number") {
     return res.status(400).json({ message: "缺少品名或價格錯誤" });
   }
 
-  const newId = menu.length ? Math.max(...menu.map(i => i.id || 0)) + 1 : 1;
-  const item = { id: newId, name, price, category, image };
+  try {
+    if (pool) {
+      const result = await pool.query(
+        `INSERT INTO menu_items (name, price, category, image)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, name, price, category, image`,
+        [name, price, category || null, image || null]
+      );
+      const row = result.rows[0];
+      return res.status(201).json({
+        id: row.id,
+        name: row.name,
+        price: Number(row.price),
+        category: row.category,
+        image: row.image
+      });
+    }
 
-  menu.push(item);
-  saveMenu(menu);
-
-  res.status(201).json(item);
+    // 無 DB 時走原本 JSON 模式
+    const menu = loadMenu();
+    const newId = menu.length ? Math.max(...menu.map(i => i.id || 0)) + 1 : 1;
+    const item = { id: newId, name, price, category, image };
+    menu.push(item);
+    saveMenu(menu);
+    return res.status(201).json(item);
+  } catch (err) {
+    console.error("新增菜單失敗", err);
+    res.status(500).json({ message: "新增菜單失敗" });
+  }
 });
 
-app.put("/api/menu/:id", (req, res) => {
-  const menu = loadMenu();
+app.put("/api/menu/:id", async (req, res) => {
   const id = Number(req.params.id);
-
-  const idx = menu.findIndex(i => Number(i.id) === id);
-  if (idx === -1) return res.status(404).json({ message: "品項不存在" });
-
   const { name, price, category, image } = req.body;
 
-  menu[idx] = {
-    ...menu[idx],
-    ...(name && { name }),
-    ...(typeof price === "number" && { price }),
-    ...(category !== undefined && { category }),
-    ...(image !== undefined && { image })
-  };
+  try {
+    if (pool) {
+      // 先查出舊資料
+      const found = await pool.query(
+        "SELECT id, name, price, category, image FROM menu_items WHERE id = $1",
+        [id]
+      );
+      if (found.rowCount === 0) {
+        return res.status(404).json({ message: "品項不存在" });
+      }
 
-  saveMenu(menu);
-  res.json(menu[idx]);
+      const old = found.rows[0];
+      const newName = name || old.name;
+      const newPrice = typeof price === "number" ? price : old.price;
+      const newCategory = category !== undefined ? category : old.category;
+      const newImage = image !== undefined ? image : old.image;
+
+      const result = await pool.query(
+        `UPDATE menu_items
+         SET name = $2,
+             price = $3,
+             category = $4,
+             image = $5
+         WHERE id = $1
+         RETURNING id, name, price, category, image`,
+        [id, newName, newPrice, newCategory, newImage]
+      );
+
+      const row = result.rows[0];
+      return res.json({
+        id: row.id,
+        name: row.name,
+        price: Number(row.price),
+        category: row.category,
+        image: row.image
+      });
+    }
+
+    // 無 DB：原本 JSON 模式
+    const menu = loadMenu();
+    const idx = menu.findIndex(i => Number(i.id) === id);
+    if (idx === -1) return res.status(404).json({ message: "品項不存在" });
+
+    menu[idx] = {
+      ...menu[idx],
+      ...(name && { name }),
+      ...(typeof price === "number" && { price }),
+      ...(category !== undefined && { category }),
+      ...(image !== undefined && { image })
+    };
+
+    saveMenu(menu);
+    return res.json(menu[idx]);
+  } catch (err) {
+    console.error("更新菜單失敗", err);
+    res.status(500).json({ message: "更新菜單失敗" });
+  }
 });
 
-app.delete("/api/menu/:id", (req, res) => {
-  const menu = loadMenu();
+app.delete("/api/menu/:id", async (req, res) => {
   const id = Number(req.params.id);
 
-  const idx = menu.findIndex(i => Number(i.id) === id);
-  if (idx === -1) return res.status(404).json({ message: "品項不存在" });
+  try {
+    if (pool) {
+      const result = await pool.query(
+        "DELETE FROM menu_items WHERE id = $1",
+        [id]
+      );
+      if (result.rowCount === 0) {
+        return res.status(404).json({ message: "品項不存在" });
+      }
+      return res.json({ message: "已刪除" });
+    }
 
-  menu.splice(idx, 1);
-  saveMenu(menu);
+    // 無 DB：原本 JSON 模式
+    const menu = loadMenu();
+    const idx = menu.findIndex(i => Number(i.id) === id);
+    if (idx === -1) return res.status(404).json({ message: "品項不存在" });
 
-  res.json({ message: "已刪除" });
+    menu.splice(idx, 1);
+    saveMenu(menu);
+
+    return res.json({ message: "已刪除" });
+  } catch (err) {
+    console.error("刪除菜單失敗", err);
+    res.status(500).json({ message: "刪除菜單失敗" });
+  }
 });
+
 
 // ------------------------------
 // ⭐ 會員：查詢 / 自動建立
