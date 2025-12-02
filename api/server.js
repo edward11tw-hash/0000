@@ -99,20 +99,50 @@ function saveOrders(orders) {
 app.get("/api/menu", async (req, res) => {
   try {
     if (pool) {
-      const result = await pool.query(
-        "SELECT id, name, price, category, image FROM menu_items ORDER BY id ASC"
-      );
-      const items = result.rows.map(r => ({
-        id: r.id,
-        name: r.name,
-        price: Number(r.price),
-        category: r.category,
-        image: r.image
-      }));
+      const result = await pool.query(`
+        SELECT 
+          id,
+          name,
+          price,
+          category,
+          image,
+          description,
+          tags,
+          spicy,
+          is_hot
+        FROM menu_items
+        ORDER BY id ASC
+      `);
+
+      const items = result.rows.map(r => {
+        // 處理 tags（可能是字串也可能是 JSON）
+        let parsedTags = [];
+        if (Array.isArray(r.tags)) {
+          parsedTags = r.tags;
+        } else if (typeof r.tags === "string" && r.tags.trim() !== "") {
+          parsedTags = r.tags
+            .split(/[;,、，]/)
+            .map(t => t.trim())
+            .filter(Boolean);
+        }
+
+        return {
+          id: r.id,
+          name: r.name,
+          price: Number(r.price),
+          category: r.category,
+          image: r.image,
+          description: r.description || "",
+          tags: parsedTags,
+          spicy: !!r.spicy,     // PostgreSQL boolean 轉 JS boolean
+          isHot: !!r.is_hot     // 給前端使用 item.isHot
+        };
+      });
+
       return res.json(items);
     }
 
-    // 沒有設定資料庫時，退回原本的 JSON 檔模式
+    // 沒資料庫時 fallback
     return res.json(loadMenu());
   } catch (err) {
     console.error("讀取菜單失敗", err);
