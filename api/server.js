@@ -503,27 +503,39 @@ function generateTicketNo() {
   return `${h}${m}${rand}`;
 }
 
-// ------------------------------
-// ⭐ 訂單 ＋ 點數處理（前台結帳用）
-// ------------------------------
+// 建立訂單（客人端 / 收銀台 都用這支）
 app.post("/api/order", (req, res) => {
-  const { items, totalAmount, mode, table, memberPhone, usePoints = 0 } = req.body;
+  const {
+    items,
+    totalAmount,
+    mode,
+    table,
+    memberPhone,
+    usePoints = 0,
+    via,
+    paymentMethod,
+    cashReceived
+  } = req.body;
 
+  // 1. 基本檢查：一定要有品項
   if (!items || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ message: "沒有商品內容" });
   }
 
-  let finalTotal = Number(totalAmount) || 0;
+  // 2. 原價總額（未折抵）
+  const originalTotal = Number(totalAmount) || 0;
+  let finalTotal = originalTotal;
 
+  // 3. 會員處理（查 / 建、扣點數）
   let members = loadMembers();
   let member = null;
   let beforePoints = 0;
   let usedPoints = 0;
 
-  // 會員折抵
   if (memberPhone) {
     member = members.find(m => m.phone === memberPhone);
     if (!member) {
+      // 新會員
       member = { phone: memberPhone, name: "", points: 0 };
       members.push(member);
     }
@@ -534,6 +546,7 @@ app.post("/api/order", (req, res) => {
       member.points,
       Math.floor(finalTotal / POINT_VALUE)
     );
+
     const wantUse = Number(usePoints) || 0;
     usedPoints = Math.min(wantUse, maxUsable);
 
@@ -543,7 +556,7 @@ app.post("/api/order", (req, res) => {
     }
   }
 
-  // 消費換點
+  // 4. 消費換點（依折抵後金額計算）
   let earnedPoints = 0;
   if (finalTotal > 0) {
     earnedPoints = Math.floor(finalTotal / POINT_PER_AMOUNT);
@@ -554,30 +567,51 @@ app.post("/api/order", (req, res) => {
     saveMembers(members);
   }
 
+  // 5. 產生訂單編號 / 取餐號碼
   const orderId = generateOrderId();
   const createdAt = new Date().toISOString();
   const ticketNo = mode === "takeout" ? generateTicketNo() : null;
 
-  // ⭐ 把訂單真的存到 orders.json
+  // 6. 判斷一開始的狀態（收銀台可以直接 PAID）
+  let initialStatus = "PENDING_PAYMENT";
+
+  if (via === "CASHIER") {
+    if (
+      paymentMethod === "CASH" ||
+      paymentMethod === "CARD" ||
+      paymentMethod === "LINEPAY"
+    ) {
+      initialStatus = "PAID";
+    }
+  }
+
+  // 7. 寫進 orders.json
   const orders = loadOrders();
+
   const order = {
-    orderId,                                // 給前端 / 後台用
+    orderId,
     items,
-    mode: mode || null,                     // 內用 / 外帶
-    table: mode === "dinein" ? (table || "") : null,
-    totalAmount: Number(totalAmount) || 0,  // 原價總額
-    finalTotal,                             // 折抵後實付
+    mode: mode || null,                               // dinein / takeout
+    table: mode === "dinein" ? (table || "") : null,  // 內用才有桌號
+    totalAmount: originalTotal,                       // 原價總額（未扣點）
+    finalTotal,                                       // 實際應收（扣點後）
     memberPhone: member ? member.phone : null,
     usedPoints,
     earnedPoints,
-    status: "PENDING_PAYMENT",              // ⭐ 新訂單狀態
+    status: initialStatus,
     createdAt,
-    ticketNo
+    ticketNo,
+
+    // 給後台、報表看的額外資訊
+    via: via || null,                                 // "CUSTOMER" / "CASHIER"
+    paymentMethod: paymentMethod || null,             // "CASH" / "CARD" / ...
+    cashReceived: Number(cashReceived) || 0
   };
+
   orders.push(order);
   saveOrders(orders);
 
-  // 回傳給前端（customer.js 用 data.orderId; 之後要顯示點數也可用 member）
+  // 8. 回傳給前端（前台 / POS 都共用這個格式）
   res.json({
     orderId,
     finalTotal,
