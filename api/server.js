@@ -109,11 +109,9 @@ app.get("/api/menu", async (req, res) => {
           description,
           tags,
           spicy,
-          is_hot,
-          is_available,
-          sort_order
+          is_hot
         FROM menu_items
-        ORDER BY sort_order ASC, id ASC
+        ORDER BY id ASC
       `);
 
       const items = result.rows.map(r => {
@@ -136,13 +134,8 @@ app.get("/api/menu", async (req, res) => {
           image: r.image,
           description: r.description || "",
           tags: parsedTags,
-          spicy: !!r.spicy,
-          isHot: !!r.is_hot,                                  // 給前端用
-          isAvailable: r.is_available !== false,              // 沒填視為上架
-          sortOrder:
-            typeof r.sort_order === "number"
-              ? r.sort_order
-              : Number(r.id) || 0
+          spicy: !!r.spicy,     // PostgreSQL boolean 轉 JS boolean
+          isHot: !!r.is_hot     // 給前端使用 item.isHot
         };
       });
 
@@ -158,6 +151,7 @@ app.get("/api/menu", async (req, res) => {
 });
 
 app.post("/api/menu", async (req, res) => {
+  // 從前端接收的欄位（後台 menu.js 會送這些）
   const {
     name,
     price,
@@ -166,9 +160,7 @@ app.post("/api/menu", async (req, res) => {
     description,
     tags,
     spicy,
-    isHot,
-    isAvailable,
-    sortOrder
+    isHot
   } = req.body;
 
   const priceNumber = Number(price);
@@ -186,38 +178,33 @@ app.post("/api/menu", async (req, res) => {
         tagsValue = tags.trim();
       }
 
-      const spicyVal = !!spicy;
-      const isHotVal = !!isHot;
-      const isAvailableVal = isAvailable === false ? false : true;
-      const sortOrderVal =
-        typeof sortOrder === "number" ? sortOrder : Date.now();
+      const spicyVal = !!spicy;  // 轉成 true/false
+      const isHotVal = !!isHot;  // 對應資料表 is_hot
 
       const result = await pool.query(
         `
         INSERT INTO menu_items
-          (name, price, category, image, description, tags, spicy, is_hot, is_available, sort_order)
+          (name, price, category, image, description, tags, spicy, is_hot)
         VALUES
-          ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+          ($1,   $2,    $3,       $4,    $5,          $6,   $7,    $8)
         RETURNING
-          id, name, price, category, image, description, tags, spicy, is_hot, is_available, sort_order
+          id, name, price, category, image, description, tags, spicy, is_hot
         `,
         [
           name,
           priceNumber,
-          category,
-          image,
-          description || "",
+          category || null,
+          image || null,
+          description || null,
           tagsValue,
           spicyVal,
-          isHotVal,
-          isAvailableVal,
-          sortOrderVal
+          isHotVal
         ]
       );
 
       const row = result.rows[0];
 
-      // 把 DB 裡的 tags 字串轉成陣列回給前端
+      // 把 DB 裡的 tags 字串轉成陣列回給前端（跟 GET /api/menu 一致）
       let parsedTags = [];
       if (Array.isArray(row.tags)) {
         parsedTags = row.tags;
@@ -237,16 +224,11 @@ app.post("/api/menu", async (req, res) => {
         description: row.description || "",
         tags: parsedTags,
         spicy: !!row.spicy,
-        isHot: !!row.is_hot,
-        isAvailable: row.is_available !== false,
-        sortOrder:
-          typeof row.sort_order === "number"
-            ? row.sort_order
-            : Number(row.id) || 0
+        isHot: !!row.is_hot
       });
     }
 
-    // 無 DB：JSON 模式（支援新欄位）
+    // 無 DB 時走原本 JSON 模式（順便支援新欄位）
     const menu = loadMenu();
     const newId = menu.length ? Math.max(...menu.map(i => i.id || 0)) + 1 : 1;
     const item = {
@@ -265,12 +247,7 @@ app.post("/api/menu", async (req, res) => {
             .filter(Boolean)
         : [],
       spicy: !!spicy,
-      isHot: !!isHot,
-      isAvailable: isAvailable === false ? false : true,
-      sortOrder:
-        typeof sortOrder === "number"
-          ? sortOrder
-          : newId
+      isHot: !!isHot
     };
     menu.push(item);
     saveMenu(menu);
@@ -292,9 +269,7 @@ app.put("/api/menu/:id", async (req, res) => {
     description,
     tags,
     spicy,
-    isHot,
-    isAvailable,
-    sortOrder
+    isHot
   } = req.body;
 
   try {
@@ -311,9 +286,7 @@ app.put("/api/menu/:id", async (req, res) => {
           description,
           tags,
           spicy,
-          is_hot,
-          is_available,
-          sort_order
+          is_hot
         FROM menu_items
         WHERE id = $1
         `,
@@ -329,7 +302,7 @@ app.put("/api/menu/:id", async (req, res) => {
       // —— 決定要更新成什麼值（沒給就沿用舊資料） ——
       const newName = name || old.name;
 
-      const newPrice =
+      const newPrice = 
         price !== undefined && !Number.isNaN(Number(price))
           ? Number(price)
           : Number(old.price);
@@ -354,48 +327,32 @@ app.put("/api/menu/:id", async (req, res) => {
       let tagsValue = null;
       if (Array.isArray(tagsToUse)) {
         tagsValue = tagsToUse.join(",");
-      } else if (
-        typeof tagsToUse === "string" &&
-        tagsToUse.trim() !== ""
-      ) {
+      } else if (typeof tagsToUse === "string" && tagsToUse.trim() !== "") {
         tagsValue = tagsToUse.trim();
       }
 
+      // 辣 / 熱銷：沒給就沿用舊值
       const newSpicy =
         spicy !== undefined ? !!spicy : !!old.spicy;
       const newIsHot =
         isHot !== undefined ? !!isHot : !!old.is_hot;
-
-      const newIsAvailable =
-        isAvailable !== undefined
-          ? !!isAvailable
-          : old.is_available !== false;
-
-      const newSortOrder =
-        sortOrder !== undefined
-          ? Number(sortOrder)
-          : typeof old.sort_order === "number"
-          ? old.sort_order
-          : Number(old.id) || 0;
 
       // —— 寫回資料庫 ——
       const result = await pool.query(
         `
         UPDATE menu_items
         SET
-          name         = $2,
-          price        = $3,
-          category     = $4,
-          image        = $5,
-          description  = $6,
-          tags         = $7,
-          spicy        = $8,
-          is_hot       = $9,
-          is_available = $10,
-          sort_order   = $11
+          name        = $2,
+          price       = $3,
+          category    = $4,
+          image       = $5,
+          description = $6,
+          tags        = $7,
+          spicy       = $8,
+          is_hot      = $9
         WHERE id = $1
         RETURNING
-          id, name, price, category, image, description, tags, spicy, is_hot, is_available, sort_order
+          id, name, price, category, image, description, tags, spicy, is_hot
         `,
         [
           id,
@@ -406,14 +363,13 @@ app.put("/api/menu/:id", async (req, res) => {
           newDescription || null,
           tagsValue,
           newSpicy,
-          newIsHot,
-          newIsAvailable,
-          newSortOrder
+          newIsHot
         ]
       );
 
       const row = result.rows[0];
 
+      // tags 轉成陣列再回給前端
       let parsedTags = [];
       if (Array.isArray(row.tags)) {
         parsedTags = row.tags;
@@ -433,16 +389,11 @@ app.put("/api/menu/:id", async (req, res) => {
         description: row.description || "",
         tags: parsedTags,
         spicy: !!row.spicy,
-        isHot: !!row.is_hot,
-        isAvailable: row.is_available !== false,
-        sortOrder:
-          typeof row.sort_order === "number"
-            ? row.sort_order
-            : Number(row.id) || 0
+        isHot: !!row.is_hot
       });
     }
 
-    // —— 無 DB：JSON 模式（順便支援新欄位） ——
+    // —— 無 DB：原本 JSON 模式（順便支援新欄位） ——
     const menu = loadMenu();
     const idx = menu.findIndex(i => Number(i.id) === id);
     if (idx === -1) {
@@ -470,9 +421,7 @@ app.put("/api/menu/:id", async (req, res) => {
           : []
       }),
       ...(spicy !== undefined && { spicy: !!spicy }),
-      ...(isHot !== undefined && { isHot: !!isHot }),
-      ...(isAvailable !== undefined && { isAvailable: !!isAvailable }),
-      ...(sortOrder !== undefined && { sortOrder: Number(sortOrder) })
+      ...(isHot !== undefined && { isHot: !!isHot })
     };
 
     menu[idx] = updated;
