@@ -97,9 +97,13 @@ function saveOrders(orders) {
 // 菜單 API
 // ------------------------------
 app.get("/api/menu", async (req, res) => {
+  const { includeInactive } = req.query;
+  const showAll = includeInactive === "true";
+
   try {
     if (pool) {
-      const result = await pool.query(`
+      const result = await pool.query(
+        `
         SELECT 
           id,
           name,
@@ -109,12 +113,15 @@ app.get("/api/menu", async (req, res) => {
           description,
           tags,
           spicy,
-          is_hot
+          is_hot,
+          is_active
         FROM menu_items
+        ${showAll ? "" : "WHERE is_active = TRUE"}
         ORDER BY id ASC
-      `);
+        `
+      );
 
-      const items = result.rows.map(r => {
+      const items = result.rows.map((r) => {
         // 處理 tags（可能是字串也可能是 JSON）
         let parsedTags = [];
         if (Array.isArray(r.tags)) {
@@ -122,7 +129,7 @@ app.get("/api/menu", async (req, res) => {
         } else if (typeof r.tags === "string" && r.tags.trim() !== "") {
           parsedTags = r.tags
             .split(/[;,、，]/)
-            .map(t => t.trim())
+            .map((t) => t.trim())
             .filter(Boolean);
         }
 
@@ -134,8 +141,9 @@ app.get("/api/menu", async (req, res) => {
           image: r.image,
           description: r.description || "",
           tags: parsedTags,
-          spicy: !!r.spicy,     // PostgreSQL boolean 轉 JS boolean
-          isHot: !!r.is_hot     // 給前端使用 item.isHot
+          spicy: !!r.spicy,
+          isHot: !!r.is_hot,
+          isActive: r.is_active !== false // null 或 true 都當作上架
         };
       });
 
@@ -143,7 +151,11 @@ app.get("/api/menu", async (req, res) => {
     }
 
     // 沒資料庫時 fallback
-    return res.json(loadMenu());
+    let menu = loadMenu() || [];
+    if (!showAll) {
+      menu = menu.filter((item) => item.isActive !== false);
+    }
+    return res.json(menu);
   } catch (err) {
     console.error("讀取菜單失敗", err);
     res.status(500).json({ message: "讀取菜單失敗" });
@@ -151,7 +163,6 @@ app.get("/api/menu", async (req, res) => {
 });
 
 app.post("/api/menu", async (req, res) => {
-  // 從前端接收的欄位（後台 menu.js 會送這些）
   const {
     name,
     price,
@@ -160,7 +171,8 @@ app.post("/api/menu", async (req, res) => {
     description,
     tags,
     spicy,
-    isHot
+    isHot,
+    isActive
   } = req.body;
 
   const priceNumber = Number(price);
@@ -178,17 +190,19 @@ app.post("/api/menu", async (req, res) => {
         tagsValue = tags.trim();
       }
 
-      const spicyVal = !!spicy;  // 轉成 true/false
-      const isHotVal = !!isHot;  // 對應資料表 is_hot
+      const spicyVal = !!spicy;   // 轉成 true/false
+      const isHotVal = !!isHot;   // 對應資料表 is_hot
+      const isActiveVal =
+        isActive === undefined ? true : !!isActive; // 沒給就預設上架
 
       const result = await pool.query(
         `
         INSERT INTO menu_items
-          (name, price, category, image, description, tags, spicy, is_hot)
+          (name, price, category, image, description, tags, spicy, is_hot, is_active)
         VALUES
-          ($1,   $2,    $3,       $4,    $5,          $6,   $7,    $8)
+          ($1,   $2,    $3,       $4,    $5,          $6,   $7,    $8,     $9)
         RETURNING
-          id, name, price, category, image, description, tags, spicy, is_hot
+          id, name, price, category, image, description, tags, spicy, is_hot, is_active
         `,
         [
           name,
@@ -198,20 +212,21 @@ app.post("/api/menu", async (req, res) => {
           description || null,
           tagsValue,
           spicyVal,
-          isHotVal
+          isHotVal,
+          isActiveVal
         ]
       );
 
       const row = result.rows[0];
 
-      // 把 DB 裡的 tags 字串轉成陣列回給前端（跟 GET /api/menu 一致）
+      // 把 DB 裡的 tags 字串轉成陣列回給前端
       let parsedTags = [];
       if (Array.isArray(row.tags)) {
         parsedTags = row.tags;
       } else if (typeof row.tags === "string" && row.tags.trim() !== "") {
         parsedTags = row.tags
           .split(/[;,、，]/)
-          .map(t => t.trim())
+          .map((t) => t.trim())
           .filter(Boolean);
       }
 
@@ -224,13 +239,17 @@ app.post("/api/menu", async (req, res) => {
         description: row.description || "",
         tags: parsedTags,
         spicy: !!row.spicy,
-        isHot: !!row.is_hot
+        isHot: !!row.is_hot,
+        isActive: row.is_active !== false
       });
     }
 
-    // 無 DB 時走原本 JSON 模式（順便支援新欄位）
+    // 無 DB 時走 JSON 模式
     const menu = loadMenu();
-    const newId = menu.length ? Math.max(...menu.map(i => i.id || 0)) + 1 : 1;
+    const newId = menu.length
+      ? Math.max(...menu.map((i) => Number(i.id) || 0)) + 1
+      : 1;
+
     const item = {
       id: newId,
       name,
@@ -243,11 +262,12 @@ app.post("/api/menu", async (req, res) => {
         : typeof tags === "string"
         ? tags
             .split(/[;,、，]/)
-            .map(t => t.trim())
+            .map((t) => t.trim())
             .filter(Boolean)
         : [],
       spicy: !!spicy,
-      isHot: !!isHot
+      isHot: !!isHot,
+      isActive: isActive === undefined ? true : !!isActive
     };
     menu.push(item);
     saveMenu(menu);
@@ -269,7 +289,8 @@ app.put("/api/menu/:id", async (req, res) => {
     description,
     tags,
     spicy,
-    isHot
+    isHot,
+    isActive
   } = req.body;
 
   try {
@@ -286,7 +307,8 @@ app.put("/api/menu/:id", async (req, res) => {
           description,
           tags,
           spicy,
-          is_hot
+          is_hot,
+          is_active
         FROM menu_items
         WHERE id = $1
         `,
@@ -302,7 +324,7 @@ app.put("/api/menu/:id", async (req, res) => {
       // —— 決定要更新成什麼值（沒給就沿用舊資料） ——
       const newName = name || old.name;
 
-      const newPrice = 
+      const newPrice =
         price !== undefined && !Number.isNaN(Number(price))
           ? Number(price)
           : Number(old.price);
@@ -327,15 +349,20 @@ app.put("/api/menu/:id", async (req, res) => {
       let tagsValue = null;
       if (Array.isArray(tagsToUse)) {
         tagsValue = tagsToUse.join(",");
-      } else if (typeof tagsToUse === "string" && tagsToUse.trim() !== "") {
+      } else if (
+        typeof tagsToUse === "string" &&
+        tagsToUse.trim() !== ""
+      ) {
         tagsValue = tagsToUse.trim();
       }
 
-      // 辣 / 熱銷：沒給就沿用舊值
+      // 辣 / 熱銷 / 上架：沒給就沿用舊值
       const newSpicy =
         spicy !== undefined ? !!spicy : !!old.spicy;
       const newIsHot =
         isHot !== undefined ? !!isHot : !!old.is_hot;
+      const newIsActive =
+        isActive !== undefined ? !!isActive : old.is_active !== false;
 
       // —— 寫回資料庫 ——
       const result = await pool.query(
@@ -349,10 +376,11 @@ app.put("/api/menu/:id", async (req, res) => {
           description = $6,
           tags        = $7,
           spicy       = $8,
-          is_hot      = $9
+          is_hot      = $9,
+          is_active   = $10
         WHERE id = $1
         RETURNING
-          id, name, price, category, image, description, tags, spicy, is_hot
+          id, name, price, category, image, description, tags, spicy, is_hot, is_active
         `,
         [
           id,
@@ -363,7 +391,8 @@ app.put("/api/menu/:id", async (req, res) => {
           newDescription || null,
           tagsValue,
           newSpicy,
-          newIsHot
+          newIsHot,
+          newIsActive
         ]
       );
 
@@ -376,7 +405,7 @@ app.put("/api/menu/:id", async (req, res) => {
       } else if (typeof row.tags === "string" && row.tags.trim() !== "") {
         parsedTags = row.tags
           .split(/[;,、，]/)
-          .map(t => t.trim())
+          .map((t) => t.trim())
           .filter(Boolean);
       }
 
@@ -389,13 +418,14 @@ app.put("/api/menu/:id", async (req, res) => {
         description: row.description || "",
         tags: parsedTags,
         spicy: !!row.spicy,
-        isHot: !!row.is_hot
+        isHot: !!row.is_hot,
+        isActive: row.is_active !== false
       });
     }
 
     // —— 無 DB：原本 JSON 模式（順便支援新欄位） ——
     const menu = loadMenu();
-    const idx = menu.findIndex(i => Number(i.id) === id);
+    const idx = menu.findIndex((i) => Number(i.id) === id);
     if (idx === -1) {
       return res.status(404).json({ message: "品項不存在" });
     }
@@ -416,12 +446,13 @@ app.put("/api/menu/:id", async (req, res) => {
           : typeof tags === "string"
           ? tags
               .split(/[;,、，]/)
-              .map(t => t.trim())
+              .map((t) => t.trim())
               .filter(Boolean)
           : []
       }),
       ...(spicy !== undefined && { spicy: !!spicy }),
-      ...(isHot !== undefined && { isHot: !!isHot })
+      ...(isHot !== undefined && { isHot: !!isHot }),
+      ...(isActive !== undefined && { isActive: !!isActive })
     };
 
     menu[idx] = updated;
