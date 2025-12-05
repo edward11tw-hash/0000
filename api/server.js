@@ -498,24 +498,196 @@ app.delete("/api/menu/:id", async (req, res) => {
 // ------------------------------
 // ⭐ 會員：查詢 / 自動建立
 // ------------------------------
-app.post("/api/member/lookup", (req, res) => {
+app.post("/api/member/lookup", async (req, res) => {
   const { phone, name } = req.body;
 
   if (!phone) {
     return res.status(400).json({ message: "缺少手機號碼" });
   }
 
-  let members = loadMembers();
-  let m = members.find(x => x.phone === phone);
+  try {
+    // ✅ 有資料庫：用 members 資料表
+    if (pool) {
+      // 先查
+      let result = await pool.query(
+        `SELECT id, phone, name, points FROM members WHERE phone = $1`,
+        [phone]
+      );
 
-  // 沒有就自動建立
-  if (!m) {
-    m = { phone, name: name || "", points: 0 };
-    members.push(m);
-    saveMembers(members);
+      let member;
+      if (result.rowCount > 0) {
+        member = result.rows[0];
+      } else {
+        // 沒有就自動建立
+        result = await pool.query(
+          `INSERT INTO members (phone, name, points)
+           VALUES ($1, $2, 0)
+           RETURNING id, phone, name, points`,
+          [phone, name || ""]
+        );
+        member = result.rows[0];
+      }
+
+      return res.json({
+        phone: member.phone,
+        name: member.name,
+        points: Number(member.points) || 0
+      });
+    }
+
+    // ❌ 沒資料庫：沿用 JSON
+    let members = loadMembers();
+    let m = members.find((x) => x.phone === phone);
+
+    if (!m) {
+      m = { phone, name: name || "", points: 0 };
+      members.push(m);
+      saveMembers(members);
+    }
+
+    return res.json(m);
+  } catch (err) {
+    console.error("會員查詢失敗", err);
+    res.status(500).json({ message: "會員查詢失敗" });
+  }
+});
+
+// ------------------------------
+// ⭐ 後台：會員 & 點數管理
+// ------------------------------
+
+// 取得所有會員（給老闆後台用）
+app.get("/api/members", async (req, res) => {
+  try {
+    if (pool) {
+      const result = await pool.query(
+        `
+        SELECT phone, name, points
+        FROM members
+        ORDER BY points DESC, phone ASC
+        `
+      );
+
+      const members = result.rows.map((r) => ({
+        phone: r.phone,
+        name: r.name,
+        points: Number(r.points) || 0
+      }));
+
+      return res.json(members);
+    }
+
+    // 沒 DB 用 JSON
+    const members = loadMembers() || [];
+    members.sort((a, b) => {
+      const pa = Number(a.points) || 0;
+      const pb = Number(b.points) || 0;
+      return pb - pa;
+    });
+
+    return res.json(members);
+  } catch (err) {
+    console.error("讀取會員資料失敗", err);
+    res.status(500).json({ message: "讀取會員資料失敗" });
+  }
+});
+
+// 更新會員資料 / 點數
+// PUT /api/members/:phone
+// body: { name?: string, points?: number, delta?: number }
+app.put("/api/members/:phone", async (req, res) => {
+  const { phone } = req.params;
+  const { name, points, delta } = req.body;
+
+  if (!phone) {
+    return res.status(400).json({ message: "缺少手機號碼" });
   }
 
-  res.json(m);
+  try {
+    if (pool) {
+      // 先查舊資料
+      const found = await pool.query(
+        `SELECT phone, name, points FROM members WHERE phone = $1`,
+        [phone]
+      );
+
+      if (found.rowCount === 0) {
+        return res.status(404).json({ message: "找不到這個會員" });
+      }
+
+      const old = found.rows[0];
+      let newName = old.name || "";
+      if (typeof name === "string") {
+        newName = name.trim();
+      }
+
+      let currentPoints = Number(old.points) || 0;
+
+      if (points !== undefined && !Number.isNaN(Number(points))) {
+        currentPoints = Math.max(0, Math.floor(Number(points)));
+      } else if (delta !== undefined && !Number.isNaN(Number(delta))) {
+        currentPoints = Math.max(
+          0,
+          Math.floor(currentPoints + Number(delta))
+        );
+      }
+
+      const updatedResult = await pool.query(
+        `
+        UPDATE members
+        SET name = $2,
+            points = $3
+        WHERE phone = $1
+        RETURNING phone, name, points
+        `,
+        [phone, newName, currentPoints]
+      );
+
+      const updated = updatedResult.rows[0];
+
+      return res.json({
+        phone: updated.phone,
+        name: updated.name,
+        points: Number(updated.points) || 0
+      });
+    }
+
+    // ❌ 沒 DB：沿用 JSON 版本
+    let members = loadMembers() || [];
+    const idx = members.findIndex((m) => m.phone === phone);
+
+    if (idx === -1) {
+      return res.status(404).json({ message: "找不到這個會員" });
+    }
+
+    const old = members[idx];
+    const updated = { ...old };
+
+    if (typeof name === "string") {
+      updated.name = name.trim();
+    }
+
+    let currentPoints = Number(old.points) || 0;
+
+    if (points !== undefined && !Number.isNaN(Number(points))) {
+      currentPoints = Math.max(0, Math.floor(Number(points)));
+    } else if (delta !== undefined && !Number.isNaN(Number(delta))) {
+      currentPoints = Math.max(
+        0,
+        Math.floor(currentPoints + Number(delta))
+      );
+    }
+
+    updated.points = currentPoints;
+
+    members[idx] = updated;
+    saveMembers(members);
+
+    return res.json(updated);
+  } catch (err) {
+    console.error("更新會員資料失敗", err);
+    res.status(500).json({ message: "更新會員資料失敗" });
+  }
 });
 
 // ------------------------------
@@ -535,7 +707,8 @@ function generateTicketNo() {
 }
 
 // 建立訂單（客人端 / 收銀台 都用這支）
-app.post("/api/order", (req, res) => {
+// 建立訂單（客人端 / 收銀台 都用這支）
+app.post("/api/order", async (req, res) => {
   const {
     items,
     totalAmount,
@@ -558,104 +731,157 @@ app.post("/api/order", (req, res) => {
   let finalTotal = originalTotal;
 
   // 3. 會員處理（查 / 建、扣點數）
-  let members = loadMembers();
   let member = null;
   let beforePoints = 0;
   let usedPoints = 0;
-
-  if (memberPhone) {
-    member = members.find(m => m.phone === memberPhone);
-    if (!member) {
-      // 新會員
-      member = { phone: memberPhone, name: "", points: 0 };
-      members.push(member);
-    }
-
-    beforePoints = member.points;
-
-    const maxUsable = Math.min(
-      member.points,
-      Math.floor(finalTotal / POINT_VALUE)
-    );
-
-    const wantUse = Number(usePoints) || 0;
-    usedPoints = Math.min(wantUse, maxUsable);
-
-    if (usedPoints > 0) {
-      finalTotal -= usedPoints * POINT_VALUE;
-      member.points -= usedPoints;
-    }
-  }
-
-  // 4. 消費換點（依折抵後金額計算）
   let earnedPoints = 0;
-  if (finalTotal > 0) {
-    earnedPoints = Math.floor(finalTotal / POINT_PER_AMOUNT);
-  }
 
-  if (member) {
-    member.points += earnedPoints;
-    saveMembers(members);
-  }
+  try {
+    if (pool && memberPhone) {
+      // 3-1. 從 DB 查 / 建會員
+      let found = await pool.query(
+        `SELECT id, phone, name, points FROM members WHERE phone = $1`,
+        [memberPhone]
+      );
 
-  // 5. 產生訂單編號 / 取餐號碼
-  const orderId = generateOrderId();
-  const createdAt = new Date().toISOString();
-  const ticketNo = mode === "takeout" ? generateTicketNo() : null;
+      if (found.rowCount === 0) {
+        found = await pool.query(
+          `INSERT INTO members (phone, name, points)
+           VALUES ($1, $2, 0)
+           RETURNING id, phone, name, points`,
+          [memberPhone, ""]
+        );
+      }
 
-  // 6. 判斷一開始的狀態（收銀台可以直接 PAID）
-  let initialStatus = "PENDING_PAYMENT";
+      member = found.rows[0];
+      beforePoints = Number(member.points) || 0;
+      let currentPoints = beforePoints;
 
-  if (via === "CASHIER") {
-    if (
-      paymentMethod === "CASH" ||
-      paymentMethod === "CARD" ||
-      paymentMethod === "LINEPAY"
-    ) {
-      initialStatus = "PAID";
+      // 3-2. 扣點數
+      const maxUsable = Math.min(
+        currentPoints,
+        Math.floor(finalTotal / POINT_VALUE)
+      );
+      const wantUse = Number(usePoints) || 0;
+      usedPoints = Math.min(wantUse, maxUsable);
+
+      if (usedPoints > 0) {
+        finalTotal -= usedPoints * POINT_VALUE;
+        currentPoints -= usedPoints;
+      }
+
+      // 3-3. 消費換點
+      if (finalTotal > 0) {
+        earnedPoints = Math.floor(finalTotal / POINT_PER_AMOUNT);
+        currentPoints += earnedPoints;
+      }
+
+      // 3-4. 回寫 DB
+      const updated = await pool.query(
+        `
+        UPDATE members
+        SET points = $2
+        WHERE phone = $1
+        RETURNING phone, name, points
+        `,
+        [memberPhone, currentPoints]
+      );
+
+      member = updated.rows[0];
+    } else if (memberPhone) {
+      // ❌ 沒 DB：沿用 JSON 版本
+      let members = loadMembers();
+      member = members.find((m) => m.phone === memberPhone);
+      if (!member) {
+        member = { phone: memberPhone, name: "", points: 0 };
+        members.push(member);
+      }
+
+      beforePoints = member.points;
+
+      const maxUsable = Math.min(
+        member.points,
+        Math.floor(finalTotal / POINT_VALUE)
+      );
+
+      const wantUse = Number(usePoints) || 0;
+      usedPoints = Math.min(wantUse, maxUsable);
+
+      if (usedPoints > 0) {
+        finalTotal -= usedPoints * POINT_VALUE;
+        member.points -= usedPoints;
+      }
+
+      if (finalTotal > 0) {
+        earnedPoints = Math.floor(finalTotal / POINT_PER_AMOUNT);
+        member.points += earnedPoints;
+      }
+
+      saveMembers(members);
     }
+
+    // 4. 產生訂單編號 / 取餐號碼
+    const orderId = generateOrderId();
+    const createdAt = new Date().toISOString();
+    const ticketNo = mode === "takeout" ? generateTicketNo() : null;
+
+    // 5. 判斷一開始的狀態（收銀台可以直接 PAID）
+    let initialStatus = "PENDING_PAYMENT";
+
+    if (via === "CASHIER") {
+      if (
+        paymentMethod === "CASH" ||
+        paymentMethod === "CARD" ||
+        paymentMethod === "LINEPAY"
+      ) {
+        initialStatus = "PAID";
+      }
+    }
+
+    // 6. 寫進 orders.json（暫時先不搬 DB）
+    const orders = loadOrders();
+
+    const order = {
+      orderId,
+      items,
+      mode: mode || null,                               // dinein / takeout
+      table: mode === "dinein" ? table || "" : null,    // 內用才有桌號
+      totalAmount: originalTotal,                       // 原價總額（未扣點）
+      finalTotal,                                       // 實際應收（扣點後）
+      memberPhone: member ? member.phone : null,
+      usedPoints,
+      earnedPoints,
+      status: initialStatus,
+      createdAt,
+      ticketNo,
+
+      // 給後台、報表看的額外資訊
+      via: via || null,                                 // "CUSTOMER" / "CASHIER"
+      paymentMethod: paymentMethod || null,             // "CASH" / "CARD" / ...
+      cashReceived: Number(cashReceived) || 0
+    };
+
+    orders.push(order);
+    saveOrders(orders);
+
+    // 7. 回傳給前端（前台 / POS 都共用這個格式）
+    return res.json({
+      orderId,
+      finalTotal,
+      member: member
+        ? {
+            phone: member.phone,
+            beforePoints,
+            usedPoints,
+            earnedPoints,
+            afterPoints: Number(member.points) || 0
+          }
+        : null
+    });
+  } catch (err) {
+    console.error("建立訂單失敗", err);
+    res.status(500).json({ message: "建立訂單失敗" });
   }
-
-  // 7. 寫進 orders.json
-  const orders = loadOrders();
-
-  const order = {
-    orderId,
-    items,
-    mode: mode || null,                               // dinein / takeout
-    table: mode === "dinein" ? (table || "") : null,  // 內用才有桌號
-    totalAmount: originalTotal,                       // 原價總額（未扣點）
-    finalTotal,                                       // 實際應收（扣點後）
-    memberPhone: member ? member.phone : null,
-    usedPoints,
-    earnedPoints,
-    status: initialStatus,
-    createdAt,
-    ticketNo,
-
-    // 給後台、報表看的額外資訊
-    via: via || null,                                 // "CUSTOMER" / "CASHIER"
-    paymentMethod: paymentMethod || null,             // "CASH" / "CARD" / ...
-    cashReceived: Number(cashReceived) || 0
-  };
-
-  orders.push(order);
-  saveOrders(orders);
-
-  // 8. 回傳給前端（前台 / POS 都共用這個格式）
-  res.json({
-    orderId,
-    finalTotal,
-    member: member
-      ? {
-          phone: member.phone,
-          beforePoints,
-          usedPoints,
-          earnedPoints,
-          afterPoints: member.points
-        }
-      : null
-  });
 });
 
 // ------------------------------
